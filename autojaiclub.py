@@ -6454,12 +6454,11 @@ Templates Preview:
         logging.info("🚀 AutoJaiClub Bot Starting...")
         logging.info("🎯 REAL AI PATTERN RECOGNITION SYSTEM")
         logging.info("✅ USING SINGLE WORKING API URL")
-        logging.info("✅ FIXED: Persistent Pyrogram connection")
+        logging.info("✅ Persistent Pyrogram connection")
         logging.info("✅ FIXED: Win/Loss media now sends immediately")
         logging.info("✅ NEW: Session start messages sent 5 minutes before each session")
         logging.info("⏰ Global Schedule: 06:00-00:00 | 50min active + 10min break")
-        logging.info("   Channel 1: 10:00-11:00, 13:00-14:00, 17:00-18:00, 20:00-21:00")
-        logging.info("   Channel 2: 09:30-10:30, 13:30-14:30, 16:30-17:30, 20:30-21:30")
+        
         
         application.run_polling()
 
