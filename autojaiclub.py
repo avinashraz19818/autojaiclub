@@ -2279,6 +2279,9 @@ class WinGoBotEnhanced:
                 "alarm1": "<emoji id=5368295871131695793>⏰</emoji>",
                 "tick": "<emoji id=5208893571599449245>✅</emoji>",
                 "rarrow": "<emoji id=6127194666526841786>➡️</emoji>",
+                "bookmark": "<emoji id=5222444124698853913>🔖</emoji>",
+                "bell": "<emoji id=5458603043203327669>🔔</emoji>",
+                "specialoffer": "<emoji id=6199721558756299589>🎲</emoji><emoji id=6199730878835331596>🎲</emoji><emoji id=6197201791638049291>🎲</emoji><emoji id=6197165366020412670>🎲</emoji><emoji id=6197003570307404476>🎲</emoji><emoji id=6199550644827722533>🎲</emoji>",
             },
             "regular_emojis": {
                 "fire": "🔥",
@@ -2310,6 +2313,9 @@ class WinGoBotEnhanced:
                 "alarm1": "⏰",
                 "tick": "✅",
                 "rarrow": "➡️",
+                "bookmark": "🔖",
+                "bell": "🔔",
+                "specialoffer": "🎲🎲🎲🎲🎲🎲",
             },
             "emoji_to_placeholder": {
                 "🔥": "{fire}",
@@ -2407,6 +2413,9 @@ class WinGoBotEnhanced:
                 "moon": "🌙", "sun": "🌅", "coffee": "☕", "sleep": "💤",
                 "break_icon": "⏸️", "reload": "🔄", "party": "🎉", "money_loss": "💸", "star2": "🌟",
                 "fire1": "🔥", "alarm1": "⏰", "tick": "✅", "rarrow": "➡️",
+                "bookmark": "🔖",
+                "bell": "🔔",
+                "specialoffer": "🎲🎲🎲🎲🎲🎲",
             }
             return regular_emojis.get(emoji_key, '')
 
