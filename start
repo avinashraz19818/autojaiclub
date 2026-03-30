@@ -30,7 +30,7 @@ echo "[✓] Dependencies ready"
 # ── 4. Kill ALL existing bot instances (any path, any user) ──────────────────
 echo "[*] Stopping any running bot instances..."
 # Kill by script name (covers all paths)
-pkill -f 'python.*ligass\.py' 2>/dev/null && echo "[✓] Old instance killed" || echo "[✓] No running instance found"
+pkill -f 'python.*autojaiclub\.py' 2>/dev/null && echo "[✓] Old instance killed" || echo "[✓] No running instance found"
 
 # Extra safety: kill by saved PID if present
 if [ -f bot.pid ]; then
