@@ -54,7 +54,7 @@ class WinGoBotEnhanced:
         # MongoDB storage
         self.bot_name = Path(__file__).stem
         self.mongo_uri = os.getenv('MONGO_URI', 'mongodb+srv://avinash:avinash12@cluster0.wnwd1fv.mongodb.net/?appName=Cluster0')
-        self.mongo_db_name = os.getenv('MONGO_DB', 'autojaiclub')
+        self.mongo_db_name = os.getenv('MONGO_DB', 'autojaiclub_main')
         self.mongo_client = None
         self.mongo_db = None
         self._init_mongo()
