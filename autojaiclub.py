@@ -54,7 +54,7 @@ class WinGoBotEnhanced:
         # MongoDB storage
         self.bot_name = Path(__file__).stem
         self.mongo_uri = os.getenv('MONGO_URI', 'mongodb+srv://avinash:avinash12@cluster0.wnwd1fv.mongodb.net/?appName=Cluster0')
-        self.mongo_db_name = os.getenv('MONGO_DB', 'sanjay_bots')
+        self.mongo_db_name = os.getenv('MONGO_DB', 'autojaiclub')
         self.mongo_client = None
         self.mongo_db = None
         self._init_mongo()
@@ -312,7 +312,7 @@ class WinGoBotEnhanced:
                 return True
 
             try:
-                session_name = str((Path(__file__).resolve().parent / "user_session_sanjay").resolve())
+                session_name = str((Path(__file__).resolve().parent / "user_session_autojaiclub").resolve())
                 
                 self.user_app = Client(
                     session_name,
@@ -6281,7 +6281,7 @@ Templates Preview:
 
     async def main_loop(self, context: ContextTypes.DEFAULT_TYPE):
         logging.info("🚀 Bot started - REAL AI PATTERN RECOGNITION")
-        logging.info("⏰ Channel-specific time windows enabled")
+        logging.info("⏰ Global 50min prediction / 10min break schedule enabled")
         logging.info("✅ Win/Loss media will send immediately on result")
         logging.info("✅ Session start messages sent 5 minutes before each session")
         
@@ -6445,26 +6445,26 @@ Templates Preview:
                     pass
             await self.shutdown()
 
-        application = Application.builder().token(self.bot_token).concurrent_updates(True).post_init(_post_init).post_shutdown(_post_shutdown).build()
+        application = Application.builder().token(self.bot_token).concurrent_updates(True).connect_timeout(30).read_timeout(30).write_timeout(30).pool_timeout(30).post_init(_post_init).post_shutdown(_post_shutdown).build()
         
         application.add_handler(CommandHandler(["start", "admin"], self.start))
         application.add_handler(CallbackQueryHandler(self.handle_callback))
         application.add_handler(MessageHandler(filters.ALL, self.handle_message))
         
-        logging.info("🚀 WinGo Bot Starting...")
+        logging.info("🚀 AutoJaiClub Bot Starting...")
         logging.info("🎯 REAL AI PATTERN RECOGNITION SYSTEM")
         logging.info("✅ USING SINGLE WORKING API URL")
         logging.info("✅ FIXED: Persistent Pyrogram connection")
         logging.info("✅ FIXED: Win/Loss media now sends immediately")
         logging.info("✅ NEW: Session start messages sent 5 minutes before each session")
-        logging.info("⏰ Channel-specific time windows:")
+        logging.info("⏰ Global Schedule: 06:00-00:00 | 50min active + 10min break")
         logging.info("   Channel 1: 10:00-11:00, 13:00-14:00, 17:00-18:00, 20:00-21:00")
         logging.info("   Channel 2: 09:30-10:30, 13:30-14:30, 16:30-17:30, 20:30-21:30")
         
         application.run_polling()
 
 if __name__ == "__main__":
-    BOT_TOKEN = "8603072947:AAFqBuL_ASrSCRaxMQfIjdq-tm1bXENdw2I"
+    BOT_TOKEN = "8603072947:AAGHIOslaGBL194XyahwF-yrD--EOrTW5oU"
     
     API_ID = 22748653
     API_HASH = "29bba513726e776d0b5fd55dfa893c5a"
