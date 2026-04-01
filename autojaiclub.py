@@ -2927,6 +2927,15 @@ class WinGoBotEnhanced:
         
         return config
 
+    def update_channel_config(self, channel_id, updates):
+        """Update channel-specific config"""
+        config = self.get_channel_config(channel_id)
+        config.update(updates)
+        if channel_id not in self.channel_configs:
+            self.channel_configs[channel_id] = config
+        self.save_config()
+        logging.info(f"✅ Channel config updated for {channel_id}: {list(updates.keys())}")
+
     def get_channel_template(self, channel_id, template_key):
         """Get template for a channel"""
         config = self.get_channel_config(channel_id)
