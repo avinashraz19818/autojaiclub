@@ -7,7 +7,7 @@ import random
 import re
 from datetime import datetime, timedelta
 from telegram import (Update, InlineKeyboardButton, InlineKeyboardMarkup,
-                       InputMediaPhoto, InputMediaVideo, InputMediaDocument)
+                       InputMediaPhoto, InputMediaVideo, InputMediaDocument, InputMediaAnimation)
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import NetworkError, TimedOut, RetryAfter
@@ -57,6 +57,7 @@ class WinGoBotEnhanced:
     - Event media with view/delete options
     - MongoDB persistence
     - Auto-delete loss predictions after 3 consecutive losses
+    - Break waits for win before proceeding
     """
     
     def __init__(self, bot_token, api_id=None, api_hash=None, phone=None):
@@ -116,6 +117,10 @@ class WinGoBotEnhanced:
         # Track sent messages to avoid duplicates
         self.session_start_sent_for_session = {}  # {channel_id: session_time}
         self.break_message_sent_for_session = {}  # {channel_id: session_time}
+        
+        # Break waiting for win - NEW
+        self.waiting_for_win_before_break = {}  # {channel_id: True/False}
+        self.pending_win_required = {}  # {channel_id: True/False}
 
         # Session tracking
         self.current_session = ""
@@ -249,27 +254,20 @@ class WinGoBotEnhanced:
             "good_morning": """
 <blockquote>{fire1}<b>𝗚𝗢𝗢𝗗 𝗠𝗢𝗥𝗡𝗜𝗡𝗚 𝗪𝗜𝗡𝗡𝗘𝗥𝗦</b>{fire1}</blockquote>
 
-{sun} <b>Welcome to a new winning session</b>
-{alarm1} <b>Prediction Time:</b> 06:00 AM - 12:00 AM
-{tick} <b>Accuracy mode active</b>
-{rarrow} <b>Get ready for today's signals</b>
+{sun} <b>New day, new profits!</b>
+{rocket} <b>Ready to win big today?</b>
 
-{star2} <b>Today's Schedule:</b>
-• 06:00 AM - 06:50 AM Prediction
-• 06:50 AM - 07:00 AM Break
-• 07:00 AM - 07:50 AM Prediction
-• 07:50 AM - 08:00 AM Break
-• Continue until midnight
+{target} <b>Predictions starting soon</b>
+{fire} <b>Stay sharp, stay winning!</b>
 """,
             "good_night": """
 <blockquote>{moon}<b>𝗚𝗢𝗢𝗗 𝗡𝗜𝗚𝗛𝗧 𝗪𝗜𝗡𝗡𝗘𝗥𝗦</b>{moon}</blockquote>
 
-{sleep} <b>Today's prediction session has ended</b>
-{trophy} <b>Wins:</b> {wins}   <b>Losses:</b> {losses}
-{chart} <b>Win Rate:</b> {win_rate:.1f}%
-{alarm1} <b>Next Start:</b> 06:00 AM
+{sleep} <b>That's a wrap for today!</b>
+{party} <b>Great session everyone!</b>
 
-{reload} <b>See you tomorrow at 6:00 AM</b>
+{star2} <b>Rest well, come back stronger</b>
+{coffee} <b>See you tomorrow morning!</b>
 """,
             "break_message": """
 <blockquote>{alarm1}<b>𝗕𝗥𝗘𝗔𝗞 𝗧𝗜𝗠𝗘</b>{alarm1}</blockquote>
@@ -1137,12 +1135,32 @@ class WinGoBotEnhanced:
                             parse_mode=ParseMode.HTML if caption else None
                         )
                     elif media_type == 'video':
-                        result = await context.bot.send_video(
-                            chat_id=chat_id,
-                            video=media_file,
-                            caption=caption,
-                            parse_mode=ParseMode.HTML if caption else None
-                        )
+                        try:
+                            result = await context.bot.send_video(
+                                chat_id=chat_id,
+                                video=media_file,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML if caption else None
+                            )
+                        except Exception as ve:
+                            if "MEDIA_EMPTY" in str(ve):
+                                # file_id is not a regular video (maybe video_note/animation)
+                                try:
+                                    result = await context.bot.send_animation(
+                                        chat_id=chat_id,
+                                        animation=media_file,
+                                        caption=caption,
+                                        parse_mode=ParseMode.HTML if caption else None
+                                    )
+                                except Exception:
+                                    result = await context.bot.send_document(
+                                        chat_id=chat_id,
+                                        document=media_file,
+                                        caption=caption,
+                                        parse_mode=ParseMode.HTML if caption else None
+                                    )
+                            else:
+                                raise
                     elif media_type == 'animation':
                         result = await context.bot.send_animation(
                             chat_id=chat_id,
@@ -1198,101 +1216,176 @@ class WinGoBotEnhanced:
             return False
         
         try:
-            # Detect actual media type from filename if needed
-            if media_type and media_file and filename_hint:
-                detected_type, actual_type = self.detect_media_type_from_file(filename_hint)
-                if actual_type != 'document':
-                    media_type = actual_type
+            # Format caption with emojis if provided
+            formatted_caption = None
+            if caption:
+                formatted_caption = self.auto_detect_and_convert_message(caption)
+                formatted_caption = self.convert_placeholder_to_premium_emoji(formatted_caption, for_channel=True)
             
+            # Handle media groups with proper captions
             if media_group and len(media_group) > 1:
                 pyrogram_media = []
                 for i, media_item in enumerate(media_group):
                     file_id = media_item.get('media')
                     item_type = media_item.get('type', 'photo')
-                    item_caption = media_item.get('caption', '') if i == 0 else None
+                    # Only first media gets caption in media group
+                    item_caption = media_item.get('caption') if i == 0 else None
                     
-                    if item_type == 'photo':
-                        media = PyrogramInputMediaPhoto(
-                            media=file_id,
-                            caption=item_caption,
-                            parse_mode=PyrogramParseMode.HTML if item_caption else None
-                        )
-                    elif item_type == 'video':
-                        media = PyrogramInputMediaVideo(
-                            media=file_id,
-                            caption=item_caption,
-                            parse_mode=PyrogramParseMode.HTML if item_caption else None
-                        )
-                    elif item_type == 'animation':
-                        media = PyrogramInputMediaAnimation(
-                            media=file_id,
-                            caption=item_caption,
-                            parse_mode=PyrogramParseMode.HTML if item_caption else None
-                        )
-                    elif item_type == 'sticker':
-                        # Send sticker separately
-                        await self.user_app.send_sticker(
-                            chat_id=target_id,
-                            sticker=file_id
-                        )
+                    if not file_id:
+                        logging.warning(f"⚠️ No file_id in media item: {media_item}")
                         continue
-                    else:
-                        media = PyrogramInputMediaDocument(
-                            media=file_id,
-                            caption=item_caption,
-                            parse_mode=PyrogramParseMode.HTML if item_caption else None
-                        )
-                    pyrogram_media.append(media)
+                    
+                    try:
+                        if item_type == 'photo':
+                            if item_caption:
+                                media = PyrogramInputMediaPhoto(
+                                    media=file_id,
+                                    caption=item_caption,
+                                    parse_mode=PyrogramParseMode.HTML
+                                )
+                            else:
+                                media = PyrogramInputMediaPhoto(media=file_id)
+                        elif item_type == 'video':
+                            if item_caption:
+                                media = PyrogramInputMediaVideo(
+                                    media=file_id,
+                                    caption=item_caption,
+                                    parse_mode=PyrogramParseMode.HTML
+                                )
+                            else:
+                                media = PyrogramInputMediaVideo(media=file_id)
+                        elif item_type == 'animation':
+                            if item_caption:
+                                media = PyrogramInputMediaAnimation(
+                                    media=file_id,
+                                    caption=item_caption,
+                                    parse_mode=PyrogramParseMode.HTML
+                                )
+                            else:
+                                media = PyrogramInputMediaAnimation(media=file_id)
+                        else:
+                            if item_caption:
+                                media = PyrogramInputMediaDocument(
+                                    media=file_id,
+                                    caption=item_caption,
+                                    parse_mode=PyrogramParseMode.HTML
+                                )
+                            else:
+                                media = PyrogramInputMediaDocument(media=file_id)
+                        pyrogram_media.append(media)
+                    except Exception as e:
+                        logging.error(f"❌ Error creating media for {item_type}: {e}")
+                        continue
                 
                 if pyrogram_media:
-                    msgs = await self.user_app.send_media_group(
-                        chat_id=target_id,
-                        media=pyrogram_media
-                    )
-                    logging.info(f"✅ Media group sent to {chat_id}")
-                    return msgs
+                    try:
+                        msgs = await self.user_app.send_media_group(
+                            chat_id=target_id,
+                            media=pyrogram_media
+                        )
+                        logging.info(f"✅ Media group sent to {chat_id}")
+                        return msgs
+                    except Exception as e:
+                        logging.error(f"❌ Media group send failed: {e}")
+                        # Fallback: send individually with captions
+                        for media in pyrogram_media:
+                            try:
+                                if isinstance(media, PyrogramInputMediaPhoto):
+                                    await self.user_app.send_photo(
+                                        chat_id=target_id, 
+                                        photo=media.media, 
+                                        caption=media.caption if hasattr(media, 'caption') else None,
+                                        parse_mode=PyrogramParseMode.HTML if media.caption else None
+                                    )
+                                elif isinstance(media, PyrogramInputMediaVideo):
+                                    await self.user_app.send_video(
+                                        chat_id=target_id, 
+                                        video=media.media, 
+                                        caption=media.caption if hasattr(media, 'caption') else None,
+                                        parse_mode=PyrogramParseMode.HTML if media.caption else None
+                                    )
+                                elif isinstance(media, PyrogramInputMediaAnimation):
+                                    await self.user_app.send_animation(
+                                        chat_id=target_id, 
+                                        animation=media.media, 
+                                        caption=media.caption if hasattr(media, 'caption') else None,
+                                        parse_mode=PyrogramParseMode.HTML if media.caption else None
+                                    )
+                                else:
+                                    await self.user_app.send_document(
+                                        chat_id=target_id, 
+                                        document=media.media, 
+                                        caption=media.caption if hasattr(media, 'caption') else None,
+                                        parse_mode=PyrogramParseMode.HTML if media.caption else None
+                                    )
+                            except Exception as e2:
+                                logging.error(f"❌ Individual send failed: {e2}")
+                        return False
             
+            # Handle single media with caption
             elif media_type and media_file:
-                # Handle stickers specially
-                if media_type == 'sticker':
-                    msg = await self.user_app.send_sticker(
-                        chat_id=target_id,
-                        sticker=media_file
-                    )
-                elif media_type == 'photo':
-                    msg = await self.user_app.send_photo(
-                        chat_id=target_id,
-                        photo=media_file,
-                        caption=caption if caption else None,
-                        parse_mode=PyrogramParseMode.HTML if caption else None
-                    )
-                elif media_type == 'video':
-                    msg = await self.user_app.send_video(
-                        chat_id=target_id,
-                        video=media_file,
-                        caption=caption if caption else None,
-                        parse_mode=PyrogramParseMode.HTML if caption else None
-                    )
-                elif media_type == 'animation':
-                    msg = await self.user_app.send_animation(
-                        chat_id=target_id,
-                        animation=media_file,
-                        caption=caption if caption else None,
-                        parse_mode=PyrogramParseMode.HTML if caption else None
-                    )
-                else:
-                    msg = await self.user_app.send_document(
-                        chat_id=target_id,
-                        document=media_file,
-                        caption=caption if caption else None,
-                        parse_mode=PyrogramParseMode.HTML if caption else None
-                    )
-                logging.info(f"✅ Media sent to {chat_id}")
-                return msg
+                if not media_file:
+                    logging.warning(f"⚠️ No media_file provided for type {media_type}")
+                    return False
+                
+                try:
+                    if media_type == 'sticker':
+                        msg = await self.user_app.send_sticker(
+                            chat_id=target_id,
+                            sticker=media_file
+                        )
+                    elif media_type == 'photo':
+                        msg = await self.user_app.send_photo(
+                            chat_id=target_id,
+                            photo=media_file,
+                            caption=formatted_caption,
+                            parse_mode=PyrogramParseMode.HTML if formatted_caption else None
+                        )
+                    elif media_type == 'video':
+                        msg = await self.user_app.send_video(
+                            chat_id=target_id,
+                            video=media_file,
+                            caption=formatted_caption,
+                            parse_mode=PyrogramParseMode.HTML if formatted_caption else None
+                        )
+                    elif media_type == 'animation':
+                        msg = await self.user_app.send_animation(
+                            chat_id=target_id,
+                            animation=media_file,
+                            caption=formatted_caption,
+                            parse_mode=PyrogramParseMode.HTML if formatted_caption else None
+                        )
+                    else:
+                        msg = await self.user_app.send_document(
+                            chat_id=target_id,
+                            document=media_file,
+                            caption=formatted_caption,
+                            parse_mode=PyrogramParseMode.HTML if formatted_caption else None
+                        )
+                    logging.info(f"✅ Media sent to {chat_id} with caption: {bool(formatted_caption)}")
+                    return msg
+                except Exception as e:
+                    err_str = str(e)
+                    # If Pyrogram cannot decode the file_id (Bot API file_ids are MTProto-incompatible),
+                    # return False immediately so bot API fallback handles it — no point retrying with Pyrogram
+                    if "Failed to decode" in err_str or "does not represent an existing local file" in err_str:
+                        logging.warning(f"⚠️ Pyrogram can't decode Bot API file_id, falling back to bot API")
+                        return False
+                    # If video fails with MEDIA_EMPTY, the file_id type is incompatible with Pyrogram
+                    # Return False immediately so bot API handles it (no point retrying with Pyrogram)
+                    if "MEDIA_EMPTY" in err_str:
+                        logging.warning(f"⚠️ Pyrogram MEDIA_EMPTY for {media_type}, delegating to bot API")
+                        return False
+                    logging.error(f"❌ Media send failed: {e}")
+                    return False
             
+            # Handle text only
             else:
                 if not text or not text.strip():
                     return False
+                # Auto-convert emojis in text before sending
+                text = self.auto_detect_and_convert_message(text)
+                text = self.convert_placeholder_to_premium_emoji(text, for_channel=True)
                 msg = await self.user_app.send_message(
                     chat_id=target_id,
                     text=text,
@@ -1302,6 +1395,7 @@ class WinGoBotEnhanced:
                 return msg
             
         except FloodWait as e:
+            logging.warning(f"⏳ FloodWait: waiting {e.value}s")
             await asyncio.sleep(e.value)
             return False
         except Exception as e:
@@ -1315,6 +1409,17 @@ class WinGoBotEnhanced:
 
     async def send_event_message(self, context, channel_id, event_type, **kwargs):
         event_type = self.normalize_event_type(event_type)
+        
+        # Check if we're in break and need to handle special cases
+        if event_type == 'break':
+            # For 11:50 PM session, send good night instead of break
+            now = self.get_ist_now()
+            if now.hour == 23 and now.minute >= 50:
+                logging.info(f"🛑 11:50 PM - Sending Good Night instead of Break for {channel_id}")
+                await self.send_event_message(context, channel_id, 'good_night', **kwargs)
+                return True
+            # Always send break message on schedule - don't wait for win
+            # This prevents bot from getting stuck
 
         custom_messages = self.get_custom_messages(channel_id, event_type)
         use_custom = custom_messages and len(custom_messages) > 0
@@ -1443,6 +1548,7 @@ class WinGoBotEnhanced:
             for media_item in media_items:
                 mtype = media_item.get('type', 'photo')
                 fid = media_item.get('file_id')
+                caption = media_item.get('caption')
                 if fid:
                     # Skip stickers in media groups - send separately
                     if mtype == 'sticker':
@@ -1458,7 +1564,7 @@ class WinGoBotEnhanced:
                     formatted_media_group.append({
                         'type': mtype,
                         'media': fid,
-                        'caption': None
+                        'caption': caption
                     })
             
             if formatted_media_group:
@@ -1537,37 +1643,53 @@ class WinGoBotEnhanced:
             return False
 
     async def track_loss_prediction(self, context, channel_id, period):
-        """Track loss prediction and auto-delete old ones"""
+        """Track loss prediction and auto-delete old ones (keep only last 3)."""
+        channel_key = str(channel_id)
+        period_key = str(period)
+
         # Get message info for this prediction
         message_info = self.prediction_message_ids.get(channel_id, {}).get(period)
         if not message_info:
-            logging.warning(f"⚠️ No message_id found for loss prediction {period} in {channel_id}")
+            message_info = self.prediction_message_ids.get(channel_key, {}).get(period_key)
+        if not message_info:
+            logging.warning(f"⚠️ No message_id found for loss prediction {period_key} in {channel_key}")
             return
-        
+
         # Initialize loss history for channel if needed
-        if channel_id not in self.loss_prediction_history:
-            self.loss_prediction_history[channel_id] = []
-        
+        if channel_key not in self.loss_prediction_history:
+            self.loss_prediction_history[channel_key] = []
+
+        # Avoid duplicate tracking of the same period/message
+        existing = self.loss_prediction_history[channel_key]
+        if any(
+            str(item.get('period')) == period_key or str(item.get('message_id')) == str(message_info['message_id'])
+            for item in existing
+        ):
+            logging.info(f"ℹ️ Loss prediction already tracked for {channel_key}: {period_key} -> {message_info['message_id']}")
+            return
+
         # Add current loss to history
-        self.loss_prediction_history[channel_id].append({
-            'period': period,
+        self.loss_prediction_history[channel_key].append({
+            'period': period_key,
             'message_id': message_info['message_id'],
             'sent_via_user': message_info.get('sent_via_user', False),
             'timestamp': datetime.now().isoformat()
         })
-        
-        logging.info(f"📌 Loss prediction tracked for {channel_id}: {period} -> {message_info['message_id']} | total={len(self.loss_prediction_history[channel_id])}")
-        
-        # Check if we need to delete old messages (keep last 3)
-        while len(self.loss_prediction_history[channel_id]) > self.max_loss_predictions_keep:
-            oldest = self.loss_prediction_history[channel_id].pop(0)
-            logging.info(f"🗑️ Deleting old loss prediction for {channel_id}: {oldest['period']} (ID: {oldest['message_id']})")
-            await self.delete_channel_message(
-                context, 
-                channel_id, 
+
+        logging.info(f"📌 Loss prediction tracked for {channel_key}: {period_key} -> {message_info['message_id']} | total={len(self.loss_prediction_history[channel_key])}")
+
+        # Keep only last 3 unique loss predictions - delete oldest if more than 3
+        while len(self.loss_prediction_history[channel_key]) > self.max_loss_predictions_keep:
+            oldest = self.loss_prediction_history[channel_key].pop(0)
+            logging.info(f"🗑️ Deleting old loss prediction for {channel_key}: {oldest['period']} (ID: {oldest['message_id']})")
+            deleted = await self.delete_channel_message(
+                context,
+                channel_id,
                 oldest['message_id'],
                 oldest.get('sent_via_user', False)
             )
+            if not deleted:
+                logging.warning(f"⚠️ Auto-delete failed for {channel_key}: {oldest['period']} (ID: {oldest['message_id']})")
 
     async def clear_loss_history_on_win(self, channel_id):
         """Clear loss history when a win occurs"""
@@ -1592,35 +1714,71 @@ class WinGoBotEnhanced:
         
         use_user_account = self.use_user_account
         
+        # Process text content with placeholders and emojis
         if text_content:
             text_content = self.format_placeholders(text_content, channel_id, **placeholders)
             formatted_text = self.format_custom_message_with_premium_emojis(text_content, channel_id)
         else:
             formatted_text = None
+        
+        # Process media items with captions
+        if media_items:
+            # For each media item, check if it has a caption
+            for i, media_item in enumerate(media_items):
+                # If media item has its own caption, use it
+                if media_item.get('caption') and not text_content:
+                    # Use the media's own caption
+                    media_caption = media_item.get('caption')
+                    media_caption = self.format_placeholders(media_caption, channel_id, **placeholders)
+                    media_caption = self.format_custom_message_with_premium_emojis(media_caption, channel_id)
+                    media_item['caption'] = media_caption
+                elif formatted_text and i == 0 and send_order == 'combined':
+                    # Use the main text as caption for first media
+                    media_item['caption'] = formatted_text
+                else:
+                    # No caption for this media
+                    media_item['caption'] = None
 
         if send_order == 'combined' and media_items:
-            formatted_media_group = []
-            for i, media_item in enumerate(media_items):
-                media_type = media_item.get('type', 'photo')
+            # Send media with combined caption (caption attached to first media)
+            if len(media_items) == 1:
+                # Single media with caption — send directly, not as a media group
+                media_item = media_items[0]
                 file_id = media_item.get('file_id')
                 if file_id:
-                    caption = formatted_text if (formatted_text and i == 0) else None
-                    formatted_media_group.append({
-                        'type': media_type,
-                        'media': file_id,
-                        'caption': caption,
-                        'file_name': media_item.get('file_name')
-                    })
-            
-            if formatted_media_group:
-                await self.send_message_with_retry(
-                    context=context,
-                    chat_id=channel_id,
-                    for_channel=bool(formatted_text),
-                    media_group=formatted_media_group
-                )
+                    await self.send_message_with_retry(
+                        context=context,
+                        chat_id=channel_id,
+                        for_channel=use_user_account,
+                        media_type=media_item.get('type', 'photo'),
+                        media_file=file_id,
+                        caption=media_item.get('caption') or formatted_text,
+                        filename_hint=media_item.get('file_name')
+                    )
+            else:
+                formatted_media_group = []
+                for i, media_item in enumerate(media_items):
+                    media_type = media_item.get('type', 'photo')
+                    file_id = media_item.get('file_id')
+                    if file_id:
+                        caption = (media_item.get('caption') or formatted_text) if i == 0 else None
+                        formatted_media_group.append({
+                            'type': media_type,
+                            'media': file_id,
+                            'caption': caption,
+                            'file_name': media_item.get('file_name')
+                        })
+                
+                if formatted_media_group:
+                    await self.send_message_with_retry(
+                        context=context,
+                        chat_id=channel_id,
+                        for_channel=use_user_account,
+                        media_group=formatted_media_group
+                    )
                 
         elif send_order == 'text_first':
+            # Send text first, then media
             if formatted_text:
                 await self.send_message_with_retry(
                     context=context,
@@ -1639,7 +1797,7 @@ class WinGoBotEnhanced:
                             formatted_media_group.append({
                                 'type': media_type,
                                 'media': file_id,
-                                'caption': None,
+                                'caption': media_item.get('caption'),
                                 'file_name': media_item.get('file_name')
                             })
                     
@@ -1647,7 +1805,7 @@ class WinGoBotEnhanced:
                         await self.send_message_with_retry(
                             context=context,
                             chat_id=channel_id,
-                            for_channel=False,
+                            for_channel=use_user_account,
                             media_group=formatted_media_group
                         )
                 else:
@@ -1655,13 +1813,15 @@ class WinGoBotEnhanced:
                     await self.send_message_with_retry(
                         context=context,
                         chat_id=channel_id,
-                        for_channel=False,
+                        for_channel=use_user_account,
                         media_type=media_item.get('type', 'photo'),
                         media_file=media_item.get('file_id'),
+                        caption=media_item.get('caption'),
                         filename_hint=media_item.get('file_name')
                     )
                     
         elif send_order == 'media_first':
+            # Send media first, then text
             if media_items:
                 if len(media_items) > 1:
                     formatted_media_group = []
@@ -1672,7 +1832,7 @@ class WinGoBotEnhanced:
                             formatted_media_group.append({
                                 'type': media_type,
                                 'media': file_id,
-                                'caption': None,
+                                'caption': media_item.get('caption'),
                                 'file_name': media_item.get('file_name')
                             })
                     
@@ -1680,7 +1840,7 @@ class WinGoBotEnhanced:
                         await self.send_message_with_retry(
                             context=context,
                             chat_id=channel_id,
-                            for_channel=False,
+                            for_channel=use_user_account,
                             media_group=formatted_media_group
                         )
                 else:
@@ -1688,9 +1848,10 @@ class WinGoBotEnhanced:
                     await self.send_message_with_retry(
                         context=context,
                         chat_id=channel_id,
-                        for_channel=False,
+                        for_channel=use_user_account,
                         media_type=media_item.get('type', 'photo'),
                         media_file=media_item.get('file_id'),
+                        caption=media_item.get('caption'),
                         filename_hint=media_item.get('file_name')
                     )
             
@@ -1730,7 +1891,22 @@ class WinGoBotEnhanced:
         if session_key in self.break_message_sent_for_session:
             return
         
-        next_hour = hour + 1 if hour < 23 else 6
+        # For 11:50 PM session (last session), do NOT send break — good night sent at 12 AM
+        if hour == 23:
+            logging.info(f"[STOP] 11:50 PM - No break message, good night will be sent at 12 AM")
+            # Mark as sent so this won't keep firing every 10s
+            self.break_message_sent_for_session[session_key] = True
+            return
+        
+        # Always send break on schedule - don't wait for win
+        # This prevents the bot from getting stuck when loss happens right before break
+        # Clear any pending break flags since we're sending break now
+        self.waiting_for_win_before_break[channel_id] = False
+        self.pending_win_required[channel_id] = False
+        self.pending_break = False
+        self.pending_break_next_session = None
+        
+        next_hour = hour + 1
         next_session_12h = self.format_time_12h(next_hour, 0)
         
         await self.send_event_message(
@@ -1763,7 +1939,11 @@ class WinGoBotEnhanced:
         # Reset tracking dictionaries
         self.session_start_sent_for_session.clear()
         self.break_message_sent_for_session.clear()
-        self.loss_prediction_history.clear()  # Clear loss history at start of day
+        self.loss_prediction_history.clear()
+        self.waiting_for_win_before_break.clear()
+        self.pending_win_required.clear()
+        self.pending_break = False
+        self.pending_break_next_session = None
         
         if not self.active_channels:
             return
@@ -1784,9 +1964,6 @@ class WinGoBotEnhanced:
         self.in_break_period = True
         self.break_message_sent = True
 
-        total_predictions = self.session_wins + self.session_losses
-        win_rate = (self.session_wins / total_predictions * 100) if total_predictions > 0 else 0
-
         if not self.active_channels:
             return
 
@@ -1797,10 +1974,7 @@ class WinGoBotEnhanced:
                     continue
 
                 await self.send_event_message(
-                    context, channel, 'good_night',
-                    wins=self.session_wins,
-                    losses=self.session_losses,
-                    win_rate=win_rate
+                    context, channel, 'good_night'
                 )
                 success_count += 1
 
@@ -1816,10 +1990,14 @@ class WinGoBotEnhanced:
             return False
         
         result_found = False
+        result_value = None
+        is_win = False
+        
         for item in data[:10]:
             if item['issueNumber'] == self.current_prediction_period:
                 result = item['big_small']
                 is_win = self.current_prediction_choice == result
+                result_value = result
                 
                 results = [item['big_small'] for item in data[:20]]
                 numbers = [item['number'] for item in data[:20]]
@@ -1864,8 +2042,21 @@ class WinGoBotEnhanced:
             latest_period = latest.get('issueNumber')
             next_period = self.get_next_period(latest_period)
             
-            choice, confidence = self.analyze_pattern_advanced(data)
+            # If last result was loss, we need to predict again immediately
+            if not is_win:
+                # We need to predict again, don't wait for break
+                choice, confidence = self.analyze_pattern_advanced(data)
+                self.current_prediction_period = next_period
+                self.current_prediction_choice = choice
+                self.waiting_for_result = True
+                
+                for channel in self.active_channels:
+                    if self.is_channel_prediction_active(channel):
+                        await self.send_single_prediction(context, channel, next_period, choice)
+                return True
             
+            # Normal flow - get next prediction
+            choice, confidence = self.analyze_pattern_advanced(data)
             self.current_prediction_period = next_period
             self.current_prediction_choice = choice
             self.waiting_for_result = True
@@ -2071,32 +2262,35 @@ class WinGoBotEnhanced:
     # ============= CUSTOM MESSAGES MANAGEMENT =============
     
     def get_custom_messages(self, channel_id, message_type):
-        if channel_id not in self.custom_messages:
+        channel_key = str(channel_id)
+        if channel_key not in self.custom_messages:
             return []
-        return self.custom_messages[channel_id].get(message_type, [])
+        return self.custom_messages[channel_key].get(message_type, [])
 
     def add_custom_message_simple(self, channel_id, message_type, message_data):
-        if channel_id not in self.custom_messages:
-            self.custom_messages[channel_id] = {}
-        if message_type not in self.custom_messages[channel_id]:
-            self.custom_messages[channel_id][message_type] = []
+        channel_key = str(channel_id)
+        if channel_key not in self.custom_messages:
+            self.custom_messages[channel_key] = {}
+        if message_type not in self.custom_messages[channel_key]:
+            self.custom_messages[channel_key][message_type] = []
         
-        self.custom_messages[channel_id][message_type].append(message_data)
+        self.custom_messages[channel_key][message_type].append(message_data)
         self.save_custom_messages()
-        return len(self.custom_messages[channel_id][message_type]) - 1
+        return len(self.custom_messages[channel_key][message_type]) - 1
 
     def delete_custom_message(self, channel_id, message_type, index=None):
-        if channel_id not in self.custom_messages or message_type not in self.custom_messages[channel_id]:
+        channel_key = str(channel_id)
+        if channel_key not in self.custom_messages or message_type not in self.custom_messages[channel_key]:
             return False
         
         if index is None:
-            del self.custom_messages[channel_id][message_type]
+            del self.custom_messages[channel_key][message_type]
             self.save_custom_messages()
             return True
-        elif 0 <= index < len(self.custom_messages[channel_id][message_type]):
-            self.custom_messages[channel_id][message_type].pop(index)
-            if not self.custom_messages[channel_id][message_type]:
-                del self.custom_messages[channel_id][message_type]
+        elif 0 <= index < len(self.custom_messages[channel_key][message_type]):
+            self.custom_messages[channel_key][message_type].pop(index)
+            if not self.custom_messages[channel_key][message_type]:
+                del self.custom_messages[channel_key][message_type]
             self.save_custom_messages()
             return True
         return False
@@ -2420,22 +2614,24 @@ class WinGoBotEnhanced:
             return regular_emojis.get(emoji_key, '')
 
     def convert_placeholder_to_premium_emoji(self, text, for_channel=False):
+        """Convert placeholders to premium emojis if user account is available"""
         if not text:
             return text
         
         try:
-            if not for_channel or not self.use_user_account:
-                for placeholder, emoji in self.emoji_config.get('placeholder_to_emoji', {}).items():
-                    if placeholder in text:
-                        text = text.replace(placeholder, emoji)
-                return text
-            
+            # First convert placeholders to premium emojis if using user account
             if for_channel and self.use_user_account:
                 for placeholder, premium_emoji in self.emoji_config.get('premium_emojis', {}).items():
                     placeholder_format = f"{{{placeholder}}}"
                     if placeholder_format in text:
                         text = text.replace(placeholder_format, premium_emoji)
+            else:
+                # Use regular emojis
+                for placeholder, emoji in self.emoji_config.get('placeholder_to_emoji', {}).items():
+                    if placeholder in text:
+                        text = text.replace(placeholder, emoji)
             
+            # Also handle any remaining placeholders
             for placeholder, emoji in self.emoji_config.get('placeholder_to_emoji', {}).items():
                 if placeholder in text:
                     text = text.replace(placeholder, emoji)
@@ -2449,6 +2645,7 @@ class WinGoBotEnhanced:
         return self.convert_placeholder_to_premium_emoji(text, for_channel)
 
     def auto_detect_and_convert_message(self, message_text):
+        """Auto-detect emojis and convert them to placeholders for storage"""
         if not message_text:
             return message_text
         
@@ -2463,11 +2660,14 @@ class WinGoBotEnhanced:
             return message_text
 
     def format_custom_message_with_premium_emojis(self, text, channel_id):
+        """Format custom message with premium emojis for sending"""
         if not text:
             return text
         
         try:
+            # First convert any emojis to placeholders for storage format
             text = self.auto_detect_and_convert_message(text)
+            # Then convert placeholders to actual emojis (premium if available)
             return self.convert_placeholder_to_premium_emoji(text, for_channel=True)
         except Exception as e:
             logging.error(f"❌ Error formatting custom message: {e}")
@@ -3502,6 +3702,8 @@ Select what to change:"""
                         del self.channel_configs[channel_id]
                     if channel_id in self.channel_prediction_status:
                         del self.channel_prediction_status[channel_id]
+                    if channel_id in self.waiting_for_win_before_break:
+                        del self.waiting_for_win_before_break[channel_id]
                     self.save_config()
                     await query.edit_message_text(f"✅ Channel {channel_id} removed successfully!", reply_markup=self.get_keyboard('main'))
                 else:
@@ -3530,8 +3732,14 @@ Select what to change:"""
                 self.break_message_sent = False
                 self.last_result_was_win = False
                 self.big_small_history.clear()
-                self.loss_prediction_history.clear()  # Clear loss history on reset
-                await query.edit_message_text("✅ Session reset complete! Loss history cleared.", reply_markup=self.get_keyboard('advanced'))
+                self.loss_prediction_history.clear()
+                self.waiting_for_win_before_break.clear()
+                self.pending_win_required.clear()
+                self.pending_break = False
+                self.pending_break_next_session = None
+                self.session_start_sent_for_session.clear()
+                self.break_message_sent_for_session.clear()
+                await query.edit_message_text("✅ Session reset complete! All tracking cleared.", reply_markup=self.get_keyboard('advanced'))
                 
             elif data == 'restart_bot':
                 await query.edit_message_text("🔄 Restarting bot...")
@@ -3565,7 +3773,7 @@ Select what to change:"""
         text = message.text.strip() if message.text else ""
         
         if text == '/cancel':
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             await message.reply_text("❌ Operation cancelled.")
             return
         
@@ -3590,7 +3798,7 @@ Select what to change:"""
                     failed += 1
 
             await message.reply_text(f"✅ Broadcast complete\n• Sent: {sent}\n• Failed: {failed}")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             return
 
         elif state == 'awaiting_add_channel' and text:
@@ -3607,6 +3815,7 @@ Select what to change:"""
                             'templates': self.default_templates.copy()
                         }
                     self.channel_prediction_status[channel] = True
+                    self.waiting_for_win_before_break[channel] = False
                     self.save_config()
                     self.user_state[chat_id] = f'awaiting_subscription_days:{channel}'
                     await message.reply_text(
@@ -3618,7 +3827,7 @@ Select what to change:"""
                     await message.reply_text("❌ Channel already exists!")
             else:
                 await message.reply_text("❌ Invalid format! Use @username or -100... ID")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
 
         elif state.startswith('awaiting_subscription_days:') and text:
             channel_id = state.split(':', 1)[1]
@@ -3635,7 +3844,7 @@ Select what to change:"""
                     )
             except Exception:
                 await message.reply_text("❌ Invalid number. Send days like: 30")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
 
         elif state == 'awaiting_break_duration' and text:
             try:
@@ -3648,7 +3857,7 @@ Select what to change:"""
                     await message.reply_text("❌ Duration must be between 1 and 120 minutes!")
             except ValueError:
                 await message.reply_text("❌ Please enter a valid number!")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             
         elif state.startswith('awaiting_template:') and text:
             parts = state.split(':')
@@ -3656,14 +3865,14 @@ Select what to change:"""
             template_key = parts[2]
             self.update_channel_config(channel_id, {'templates': {template_key: text}})
             await message.reply_text(f"✅ Template updated for {channel_id}!")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             
         elif state.startswith('awaiting_template_all:') and text:
             template_key = state.split(':', 1)[1]
             for channel_id in self.active_channels:
                 self.update_channel_config(channel_id, {'templates': {template_key: text}})
             await message.reply_text(f"✅ Template updated for ALL channels!")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             
         elif state.startswith('awaiting_custom_message:') and (message.photo or message.video or message.document or message.animation or message.sticker or text):
             parts = state.split(':')
@@ -3753,7 +3962,7 @@ Select what to change:"""
             response += f"• Send Order: {message_data['send_order']}"
             
             await message.reply_text(response)
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             
         elif state.startswith('awaiting_event_media:') and (message.photo or message.video or message.document or message.animation or message.sticker):
             parts = state.split(':')
@@ -3818,20 +4027,20 @@ Select what to change:"""
             event_type = parts[2]
             media_list = self.get_event_media(channel_id, event_type)
             await message.reply_text(f"✅ Finished adding {self.message_types.get(event_type, event_type)} media!\nTotal media: {len(media_list)}")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             
         elif state.startswith('awaiting_register_link:') and text:
             channel_id = state.split(':', 1)[1]
             self.update_channel_config(channel_id, {'register_link': text})
             await message.reply_text(f"✅ Register link updated for {channel_id}!")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
             
         elif state.startswith('awaiting_promo_text:') and text:
             channel_id = state.split(':', 1)[1]
             converted_text = self.auto_detect_and_convert_message(text)
             self.update_channel_config(channel_id, {'promotional_text': converted_text})
             await message.reply_text(f"✅ Promotional text updated for {channel_id}!")
-            del self.user_state[chat_id]
+            self.user_state.pop(chat_id, None)
 
     def get_message_type_keyboard(self, channel_id):
         buttons = []
@@ -3864,12 +4073,11 @@ Select what to change:"""
         if any(file_name.endswith(ext) for ext in video_extensions) or mime_type.startswith('video/'):
             return 'video', 'video'
         
-        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp']
+        image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif']
         if any(file_name.endswith(ext) for ext in image_extensions) or mime_type.startswith('image/'):
+            if file_name.endswith('.gif') or mime_type == 'image/gif':
+                return 'animation', 'animation'
             return 'photo', 'photo'
-        
-        if file_name.endswith('.gif') or mime_type == 'image/gif':
-            return 'animation', 'animation'
         
         return 'document', 'document'
 
@@ -3932,7 +4140,6 @@ Select what to change:"""
         if keyboard_type == 'custom_messages_menu':
             return InlineKeyboardMarkup([
                 [InlineKeyboardButton("📋 Select Channel", callback_data="select_channel_custom_messages")],
-                [InlineKeyboardButton("➕ Add Message", callback_data="add_custom_message_start")],
                 [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
             ])
         
@@ -3969,14 +4176,6 @@ Select what to change:"""
                 buttons.append(row)
             buttons.append([InlineKeyboardButton("🔙 Back", callback_data="event_media_menu")])
             return InlineKeyboardMarkup(buttons)
-        
-        if keyboard_type == 'event_media_channel' and channel_id:
-            # This is handled directly in callback
-            pass
-        
-        if keyboard_type == 'event_media_type' and channel_id and event_type:
-            # This is handled directly in callback
-            pass
         
         if keyboard_type == 'select_channel_custom_messages':
             if not self.active_channels:
@@ -4163,8 +4362,9 @@ Select what to change:"""
                 
                 # Check for session start messages (5 minutes before each session)
                 # Session starts at :00, so send at :55
-                if current_minute == 55:
-                    next_hour = current_hour + 1 if current_hour < 23 else 6
+                # Skip 23:55 — midnight is end of day, not a new session start
+                if current_minute == 55 and current_hour != 23:
+                    next_hour = current_hour + 1
                     if next_hour >= self.prediction_start_hour and next_hour < self.prediction_end_hour:
                         # Send session start message for all active channels
                         for channel in self.active_channels:
@@ -4177,7 +4377,7 @@ Select what to change:"""
                 # Check for break messages at the end of each session (:50)
                 if current_minute == self.prediction_active_minutes:
                     current_session_hour = current_hour
-                    # Only send break if we're in prediction hours
+                    # Only send break if we're in prediction hours and not at 11:50 PM
                     if current_session_hour >= self.prediction_start_hour and current_session_hour < self.prediction_end_hour:
                         for channel in self.active_channels:
                             if self.is_channel_prediction_active(channel):
@@ -4190,10 +4390,26 @@ Select what to change:"""
                 is_active, _, _, _, _ = self.get_current_session_info()
                 
                 if is_active:
+                    # Clear any pending break/waiting flags when session becomes active
+                    # This ensures session restarts properly after break
+                    if self.pending_break:
+                        self.pending_break = False
+                        self.pending_break_next_session = None
+                        for channel in self.active_channels:
+                            self.waiting_for_win_before_break[channel] = False
+                            self.pending_win_required[channel] = False
+                    
                     data = await self.fetch_live_data()
                     if data:
+                        # Force resume at top of every active minute even after break/session-start transitions
+                        if current_minute == 0:
+                            self.waiting_for_result = False
+                            self.current_prediction_period = None
                         if self.waiting_for_result:
-                            await self.check_result_and_send_next(context, data)
+                            handled = await self.check_result_and_send_next(context, data)
+                            if not handled and current_minute < self.prediction_active_minutes:
+                                self.waiting_for_result = False
+                                await self.send_first_prediction(context, data)
                         else:
                             await self.send_first_prediction(context, data)
                 
@@ -4270,3 +4486,4 @@ if __name__ == "__main__":
     
     bot = WinGoBotEnhanced(BOT_TOKEN, api_id=API_ID, api_hash=API_HASH, phone=PHONE)
     bot.run()
+
