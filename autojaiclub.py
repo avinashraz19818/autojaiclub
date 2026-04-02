@@ -149,9 +149,9 @@ class WinGoBotEnhanced:
 
         # Prediction message tracking
         self.prediction_message_ids = {}  # {channel_id: {period: {'message_id': id, 'sent_via_user': bool}}}
-        self.loss_prediction_history = {}  # {channel_id: [{'period': period, 'message_id': id, 'sent_via_user': bool}]}
+        self.prediction_history = {}  # {channel_id: [{'period': period, 'message_id': id, 'sent_via_user': bool, 'result': 'win'/'loss'/'pending'}]}
         self.cycle_prediction_ids = {}
-        self.max_loss_predictions_keep = 3  # Keep only last 3 loss predictions
+        self.max_predictions_keep = 3  # Keep only last 2 losses + current win inside an active block
         self.last_sent_prediction_period = None
 
         # Break control
@@ -180,8 +180,7 @@ class WinGoBotEnhanced:
         self.user_state = {}
         self.session_predictions = []
 
-        # Advanced prediction tracking
-        self.prediction_history = []
+        # Advanced prediction tracking - removed duplicate, using dict from line 152
         self.last_10_results = []
         self.pattern_memory = deque(maxlen=1000)
         self.number_memory = deque(maxlen=1000)
@@ -1767,6 +1766,8 @@ class WinGoBotEnhanced:
                     'sent_via_user': sent_via_user
                 }
                 logging.info(f"📝 Stored prediction message_id {msg_id} for period {period} in channel {channel_id} (via_user={sent_via_user})")
+                # Track this prediction (initially pending)
+                await self.track_prediction(context, channel_id, period, result='pending')
         
         return result
 
@@ -1800,70 +1801,106 @@ class WinGoBotEnhanced:
             logging.warning(f"⚠️ Failed to delete message {message_id} in {channel_id}: {e}")
             return False
 
+    async def track_prediction(self, context, channel_id, period, result='pending'):
+        """Track prediction (win or loss) following user's exact rules."""
+        try:
+            channel_key = str(channel_id)
+            period_key = str(period)
+
+            # Get message info for this prediction
+            message_info = self.prediction_message_ids.get(channel_id, {}).get(period)
+            if not message_info:
+                message_info = self.prediction_message_ids.get(channel_key, {}).get(period_key)
+            if not message_info:
+                logging.warning(f"⚠️ No message_id found for prediction {period_key} in {channel_key}")
+                return
+
+            # Initialize prediction history for channel if needed
+            if channel_key not in self.prediction_history:
+                self.prediction_history[channel_key] = []
+
+            existing = self.prediction_history[channel_key]
+            
+            # Ensure existing is a list (safety check)
+            if not isinstance(existing, list):
+                logging.error(f"❌ prediction_history[{channel_key}] is not a list: {type(existing)}")
+                self.prediction_history[channel_key] = []
+                existing = self.prediction_history[channel_key]
+            
+            # Update existing prediction if found
+            for item in existing:
+                if str(item.get('period')) == period_key:
+                    if result != 'pending':
+                        item['result'] = result
+                        logging.info(f"🔄 Updated prediction result for {channel_key}: {period_key} -> {result}")
+                    return
+
+            # Add current prediction to history
+            new_prediction = {
+                'period': period_key,
+                'message_id': message_info['message_id'],
+                'sent_via_user': message_info.get('sent_via_user', False),
+                'result': result,
+                'timestamp': datetime.now().isoformat()
+            }
+            existing.append(new_prediction)
+            logging.info(f"📌 Prediction tracked for {channel_key}: {period_key} -> {message_info['message_id']} (result={result}) | total={len(existing)}")
+
+            # User rule:
+            # - keep prediction history until a WIN arrives
+            # - on WIN, keep only the last 2 losses before that WIN + the WIN itself
+            # - older already-completed groups remain in channel/history
+            if result == 'win':
+                win_index = None
+                for idx, item in enumerate(existing):
+                    if str(item.get('period')) == period_key:
+                        win_index = idx
+                        break
+
+                if win_index is not None:
+                    losses_before_current_win = [
+                        item for item in existing[:win_index]
+                        if item.get('result') == 'loss'
+                    ]
+
+                    if len(losses_before_current_win) > 2:
+                        losses_to_delete = losses_before_current_win[:-2]
+                        for loss_to_delete in losses_to_delete:
+                            logging.info(
+                                f"🗑️ Deleting old loss before win for {channel_key}: {loss_to_delete['period']}"
+                            )
+                            if loss_to_delete in existing:
+                                existing.remove(loss_to_delete)
+                                await self.delete_channel_message(
+                                    context,
+                                    channel_id,
+                                    loss_to_delete['message_id'],
+                                    loss_to_delete.get('sent_via_user', False)
+                                )
+        except Exception as e:
+            logging.error(f"❌ Error in track_prediction: {e}")
+            logging.error(f"❌ channel_id: {channel_id}, period: {period}, result: {result}")
+            import traceback
+            traceback.print_exc()
+
     async def track_loss_prediction(self, context, channel_id, period):
-        """Track loss prediction and auto-delete old ones (keep only last 3)."""
-        channel_key = str(channel_id)
-        period_key = str(period)
-
-        # Get message info for this prediction
-        message_info = self.prediction_message_ids.get(channel_id, {}).get(period)
-        if not message_info:
-            message_info = self.prediction_message_ids.get(channel_key, {}).get(period_key)
-        if not message_info:
-            logging.warning(f"⚠️ No message_id found for loss prediction {period_key} in {channel_key}")
-            return
-
-        # Initialize loss history for channel if needed
-        if channel_key not in self.loss_prediction_history:
-            self.loss_prediction_history[channel_key] = []
-
-        # Avoid duplicate tracking of the same period/message
-        existing = self.loss_prediction_history[channel_key]
-        if any(
-            str(item.get('period')) == period_key or str(item.get('message_id')) == str(message_info['message_id'])
-            for item in existing
-        ):
-            logging.info(f"ℹ️ Loss prediction already tracked for {channel_key}: {period_key} -> {message_info['message_id']}")
-            return
-
-        # Add current loss to history
-        self.loss_prediction_history[channel_key].append({
-            'period': period_key,
-            'message_id': message_info['message_id'],
-            'sent_via_user': message_info.get('sent_via_user', False),
-            'timestamp': datetime.now().isoformat()
-        })
-
-        logging.info(f"📌 Loss prediction tracked for {channel_key}: {period_key} -> {message_info['message_id']} | total={len(self.loss_prediction_history[channel_key])}")
-
-        # Keep only last 3 unique loss predictions - delete oldest if more than 3
-        while len(self.loss_prediction_history[channel_key]) > self.max_loss_predictions_keep:
-            oldest = self.loss_prediction_history[channel_key].pop(0)
-            logging.info(f"🗑️ Deleting old loss prediction for {channel_key}: {oldest['period']} (ID: {oldest['message_id']})")
-            deleted = await self.delete_channel_message(
-                context,
-                channel_id,
-                oldest['message_id'],
-                oldest.get('sent_via_user', False)
-            )
-            if not deleted:
-                logging.warning(f"⚠️ Auto-delete failed for {channel_key}: {oldest['period']} (ID: {oldest['message_id']})")
+        """Backward compatibility: track loss prediction."""
+        await self.track_prediction(context, channel_id, period, result='loss')
 
     async def clear_loss_history_on_win(self, channel_id):
-        """Clear loss history when a win occurs"""
-        if channel_id in self.loss_prediction_history and self.loss_prediction_history[channel_id]:
-            cleared_count = len(self.loss_prediction_history[channel_id])
-            self.loss_prediction_history[channel_id] = []
-            logging.info(f"🎉 Win detected! Cleared {cleared_count} loss predictions for {channel_id}")
-            return True
+        """Backward compatibility helper; win cleanup is handled in track_prediction."""
         return False
 
-    def reset_loss_prediction_history(self, channel_id=None):
-        """Reset loss prediction history"""
+    def reset_prediction_history(self, channel_id=None):
+        """Reset prediction history (win or loss)"""
         if channel_id is None:
-            self.loss_prediction_history = {}
+            self.prediction_history = {}
         else:
-            self.loss_prediction_history[channel_id] = []
+            self.prediction_history[channel_id] = []
+
+    def reset_loss_prediction_history(self, channel_id=None):
+        """Backward compatibility: reset prediction history"""
+        self.reset_prediction_history(channel_id)
 
     async def send_stored_message(self, context, channel_id, message_data, **placeholders):
         media_items = message_data.get('media_group', [])
@@ -2098,16 +2135,25 @@ class WinGoBotEnhanced:
             self.break_message_sent_for_session[session_key] = True
             return
         
-        # Always send break on schedule - don't wait for win
-        # This prevents the bot from getting stuck when loss happens right before break
-        # Clear any pending break flags since we're sending break now
+        next_hour = hour + 1
+        next_session_12h = self.format_time_12h(next_hour, 0)
+        
+        # Check if we should wait for win before break
+        # If there's no win in current session, wait for win before sending break
+        if not self.last_result_was_win:
+            # No win yet - wait for win before break
+            self.waiting_for_win_before_break[channel_id] = True
+            self.pending_break = True
+            self.pending_break_next_session = next_session_12h
+            logging.info(f"⏸️ {channel_id}: No win yet, waiting for win before break")
+            # Don't mark as sent yet - we'll send break after win
+            return
+        
+        # There was a win - clear flags and send break immediately
         self.waiting_for_win_before_break[channel_id] = False
         self.pending_win_required[channel_id] = False
         self.pending_break = False
         self.pending_break_next_session = None
-        
-        next_hour = hour + 1
-        next_session_12h = self.format_time_12h(next_hour, 0)
         
         await self.send_event_message(
             context, channel_id, 'break',
@@ -2247,17 +2293,56 @@ class WinGoBotEnhanced:
                     self.last_prediction_was_loss = False
                     self.last_result_was_win = True
                     logging.info(f"✅ WIN! {self.current_prediction_choice} == {result}")
+                    # Update prediction history for all channels
+                    for channel in self.active_channels:
+                        await self.track_prediction(context, channel, self.current_prediction_period, result='win')
                     
                     if hasattr(self, 'last_strategy'):
                         self.strategy_success_count[self.last_strategy] = self.strategy_success_count.get(self.last_strategy, 0) + 1
                     
-                    # Send win media to all channels
-                    for channel in self.active_channels:
-                        if self.is_channel_prediction_active(channel):
-                            await self.send_event_message(context, channel, 'win', 
-                                prediction=self.current_prediction_choice,
-                                result=result,
-                                session=self.current_session)
+                    # Send win media to all channels - only if in active session and in schedule
+                    is_active, _, _, _, _ = self.get_current_session_info()
+                    if is_active:
+                        for channel in self.active_channels:
+                            # Check if channel is active and in schedule (if method exists)
+                            in_schedule = True
+                            if hasattr(self, 'is_channel_in_schedule'):
+                                in_schedule = self.is_channel_in_schedule(channel)
+                            
+                            if self.is_channel_prediction_active(channel) and in_schedule:
+                                await self.send_event_message(context, channel, 'win', 
+                                    prediction=self.current_prediction_choice,
+                                    result=result,
+                                    session=self.current_session)
+                    
+                    # Check if we're waiting for win before break - if so, send break now
+                    if self.pending_break:
+                        for channel in self.active_channels:
+                            if self.waiting_for_win_before_break.get(channel, False):
+                                # Clear waiting flag
+                                self.waiting_for_win_before_break[channel] = False
+                                self.pending_win_required[channel] = False
+                                
+                                # Calculate next session for display
+                                next_session_display = self.pending_break_next_session or "next session"
+                                
+                                # Send break message
+                                await self.send_event_message(
+                                    context, channel, 'break',
+                                    next_session=next_session_display,
+                                    break_duration=self.prediction_break_minutes
+                                )
+                                
+                                # Also send break media if available
+                                break_media = self.get_event_media(channel, 'break')
+                                if break_media:
+                                    await self.send_media_group(context, channel, break_media)
+                                
+                                logging.info(f"⏸️ Break message sent to {channel} after win")
+                        
+                        # Clear pending break flags
+                        self.pending_break = False
+                        self.pending_break_next_session = None
                 else:
                     self.session_losses += 1
                     self.consecutive_losses += 1
@@ -2265,17 +2350,27 @@ class WinGoBotEnhanced:
                     self.last_prediction_was_loss = True
                     self.last_result_was_win = False
                     logging.info(f"❌ LOSS! {self.current_prediction_choice} != {result}")
+                    # Update prediction history for all channels
+                    for channel in self.active_channels:
+                        await self.track_prediction(context, channel, self.current_prediction_period, result='loss')
                     
                     if hasattr(self, 'last_strategy'):
                         self.strategy_success_count[self.last_strategy] = max(0, self.strategy_success_count.get(self.last_strategy, 0.5) - 0.1)
                     
-                    # Send loss media to all channels
-                    for channel in self.active_channels:
-                        if self.is_channel_prediction_active(channel):
-                            await self.send_event_message(context, channel, 'loss',
-                                prediction=self.current_prediction_choice,
-                                result=result,
-                                session=self.current_session)
+                    # Send loss media to all channels - only if in active session and in schedule
+                    is_active, _, _, _, _ = self.get_current_session_info()
+                    if is_active:
+                        for channel in self.active_channels:
+                            # Check if channel is active and in schedule (if method exists)
+                            in_schedule = True
+                            if hasattr(self, 'is_channel_in_schedule'):
+                                in_schedule = self.is_channel_in_schedule(channel)
+                            
+                            if self.is_channel_prediction_active(channel) and in_schedule:
+                                await self.send_event_message(context, channel, 'loss',
+                                    prediction=self.current_prediction_choice,
+                                    result=result,
+                                    session=self.current_session)
                 
                 # Mark this period as resolved
                 self.resolved_prediction_targets.add(current_target)
@@ -2900,6 +2995,22 @@ class WinGoBotEnhanced:
         """Check if predictions are active for a channel"""
         return self.channel_prediction_status.get(channel_id, True)
 
+    def set_channel_prediction_status(self, channel_id, status):
+        """Set prediction status for a channel"""
+        self.channel_prediction_status[channel_id] = status
+        self.save_config()
+        logging.info(f"✅ Prediction status for {channel_id}: {'Active' if status else 'Paused'}")
+        return status
+
+    def toggle_channel_prediction(self, channel_id):
+        """Toggle prediction status for a channel"""
+        current = self.channel_prediction_status.get(channel_id, True)
+        new_status = not current
+        self.channel_prediction_status[channel_id] = new_status
+        self.save_config()
+        logging.info(f"✅ Prediction toggled for {channel_id}: {'Active' if new_status else 'Paused'}")
+        return new_status
+
     def get_channel_config(self, channel_id):
         """Get channel-specific config or create default"""
         if channel_id not in self.channel_configs:
@@ -3208,7 +3319,7 @@ class WinGoBotEnhanced:
             "• Session Start: 5 min before each session\n"
             "• Break Message: At end of each session\n\n"
             "🔄 AUTO-DELETE FEATURE:\n"
-            "• Keeps last 3 loss predictions only\n"
+            "• On WIN, keeps last 2 LOSS + current WIN\n"
             "• Old loss messages auto-deleted\n"
             "• Cleared on win\n\n"
             "Select an option below:",
@@ -3245,7 +3356,7 @@ class WinGoBotEnhanced:
                     "• Session Start: 5 min before each session\n"
                     "• Break Message: At end of each session\n\n"
                     "🔄 AUTO-DELETE FEATURE:\n"
-                    "• Keeps last 3 loss predictions only\n"
+                    "• On WIN, keeps last 2 LOSS + current WIN\n"
                     "• Old loss messages auto-deleted\n"
                     "• Cleared on win\n\n"
                     "Select an option:",
@@ -3262,8 +3373,8 @@ class WinGoBotEnhanced:
                 
                 is_active, session_start, session_end, next_session, minutes_until = self.get_current_session_info()
                 
-                # Count loss messages currently tracked
-                total_loss_tracked = sum(len(history) for history in self.loss_prediction_history.values())
+                # Count prediction messages currently tracked (win or loss)
+                total_predictions_tracked = sum(len(history) for history in self.prediction_history.values())
                 
                 stats_text = f"""📊 Bot Statistics & AI Analysis
 
@@ -3281,8 +3392,8 @@ class WinGoBotEnhanced:
 • Consecutive Losses: {self.consecutive_losses}
 
 🔄 AUTO-DELETE STATUS:
-• Loss Messages Tracked: {total_loss_tracked}
-• Max Keep Per Channel: {self.max_loss_predictions_keep}
+• Predictions Tracked (Win/Loss): {total_predictions_tracked}
+• Max Keep Per Channel: {self.max_predictions_keep}
 
 ⏰ SCHEDULE STATUS:
 • Current Status: {'🟢 ACTIVE' if is_active else '⏸️ BREAK'}
@@ -4001,7 +4112,7 @@ Select what to change:"""
                 self.break_message_sent = False
                 self.last_result_was_win = False
                 self.big_small_history.clear()
-                self.loss_prediction_history.clear()
+                self.prediction_history.clear()
                 self.waiting_for_win_before_break.clear()
                 self.pending_win_required.clear()
                 self.pending_break = False
@@ -4669,13 +4780,15 @@ Select what to change:"""
                                     await self.send_break_message_for_channel(context, channel, current_session_hour)
                                     last_break_hour[channel] = current_session_hour
                 
-                # Process predictions during active hours
+                # Process predictions during active hours OR waiting for win before break
                 is_active, _, _, _, _ = self.get_current_session_info()
+                any_channel_waiting_for_win = any(self.waiting_for_win_before_break.get(ch, False) for ch in self.active_channels)
                 
-                if is_active:
+                if is_active or any_channel_waiting_for_win:
                     # Clear any pending break/waiting flags when session becomes active
                     # This ensures session restarts properly after break
-                    if self.pending_break:
+                    # Only clear when session is active, not when just waiting for win before break
+                    if is_active and self.pending_break:
                         self.pending_break = False
                         self.pending_break_next_session = None
                         for channel in self.active_channels:
@@ -4684,11 +4797,10 @@ Select what to change:"""
                     
                     data = await self.fetch_live_data()
                     if data:
-                        # Force resume at top of every active minute even after break/session-start transitions
+                        # Only clear resolved targets at minute 0, don't reset current period
                         if current_minute == 0:
-                            self.waiting_for_result = False
-                            self.current_prediction_period = None
                             self.resolved_prediction_targets.clear()
+                        
                         if self.waiting_for_result:
                             handled = await self.check_result_and_send_next(context, data)
                             if not handled:
@@ -4696,7 +4808,8 @@ Select what to change:"""
                                 pass
                         else:
                             # No prediction sent yet, send first prediction
-                            if not self.current_prediction_period:
+                            # Only send if we're not already tracking a period
+                            if not self.current_prediction_period and not self.waiting_for_result:
                                 await self.send_first_prediction(context, data)
                 
                 if self.ai_total_predictions % 25 == 0 and self.ai_total_predictions > 0:
